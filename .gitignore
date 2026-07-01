@@ -1,0 +1,12 @@
+node_modules/
+client/node_modules/
+client/dist/
+data/
+*.sqlite
+*.sqlite3
+*.db
+.env
+.env.local
+.vercel
+npm-debug.log*
+.DS_Store
