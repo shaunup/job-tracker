@@ -1,0 +1,27 @@
+{
+  "name": "job-tracker",
+  "version": "1.0.0",
+  "description": "A dashboard that tracks your job applications by reading and classifying your Gmail.",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "server": "node --watch server/index.js",
+    "client": "npm --prefix client run dev",
+    "dev": "concurrently -n server,client -c blue,magenta \"npm run server\" \"npm run client\"",
+    "build": "npm --prefix client install && npm --prefix client run build",
+    "postinstall": "npm --prefix client install"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "cookie-parser": "^1.4.6",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "googleapis": "^144.0.0"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.1"
+  }
+}
