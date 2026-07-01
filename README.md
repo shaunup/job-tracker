@@ -29,12 +29,13 @@ its new status automatically — so the board is always up to date.
 
 ## Tech stack
 
-| Layer     | Choice                                   |
-| --------- | ---------------------------------------- |
-| Backend   | Node.js + Express                        |
-| Data      | SQLite (`better-sqlite3`)                |
-| Gmail     | `googleapis` (OAuth 2.0, `gmail.readonly`) |
-| Frontend  | React + Vite (custom CSS design system)  |
+| Layer     | Choice                                        |
+| --------- | --------------------------------------------- |
+| Backend   | Node.js + Express                             |
+| Data      | Dependency-free JSON store (no native modules) |
+| Gmail     | `googleapis` (OAuth 2.0, `gmail.readonly`)    |
+| Frontend  | React + Vite (custom CSS design system)       |
+| Deploy    | Vercel (serverless) **or** Render/Railway/Fly (persistent) |
 
 ---
 
@@ -95,6 +96,46 @@ your machine. The scope is **read-only** — the app can never send or delete ma
 
 ---
 
+## Deploying
+
+The app ships with config for both a serverless and a persistent host.
+
+### Option A — Vercel (serverless)
+
+`vercel.json` is included: it builds the Vite client, serves it as static files,
+and runs the Express API as a serverless function (`api/index.js`). The `/api/*`
+routes are rewritten to that function.
+
+1. Import the repo into Vercel.
+2. In **Project → Settings → Environment Variables**, add:
+   - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
+   - `GOOGLE_REDIRECT_URI = https://<your-project>.vercel.app/api/auth/google/callback`
+3. Add that exact redirect URI to your Google Cloud OAuth client.
+4. Redeploy, then click **Connect Gmail**.
+
+A daily [Vercel Cron](https://vercel.com/docs/cron-jobs) hit to `/api/cron/sync`
+refreshes statuses automatically (the **Sync now** button triggers it instantly
+any time). On the Pro plan you can increase the cron frequency in `vercel.json`.
+
+> **Serverless persistence caveat:** Vercel functions have an ephemeral, per-
+> instance `/tmp` filesystem, so stored emails and your Gmail connection can
+> reset on cold starts. This is fine for trying the app, but for durable,
+> always-fresh tracking use a persistent host (below).
+
+### Option B — Render / Railway / Fly (persistent, recommended for real use)
+
+A `render.yaml` blueprint is included. A single long-lived process means the
+built-in **auto-sync polling** (`SYNC_INTERVAL_MINUTES`) works continuously and,
+with a mounted disk (`DATA_DIR`), your data persists across restarts.
+
+1. Push to GitHub → in Render pick **New + → Blueprint** and select the repo.
+2. Provide the `GOOGLE_*` env vars and set `GOOGLE_REDIRECT_URI` to
+   `https://<service>.onrender.com/api/auth/google/callback`.
+3. Add that redirect URI to your Google Cloud OAuth client, then **Connect Gmail**.
+
+The same setup works on Railway, Fly.io, a VPS, or Docker — anywhere you can run
+`npm start` as a persistent process.
+
 ## How status detection works
 
 Each email is passed through [`server/classifier.js`](server/classifier.js),
@@ -141,6 +182,7 @@ recruiters use in your industry.
 | GET    | `/api/jobs`                   | All tracked jobs + per-status counts.    |
 | GET    | `/api/jobs/:key/emails`       | Email timeline for one job.              |
 | POST   | `/api/sync`                   | Trigger a Gmail sync now.                |
+| GET    | `/api/cron/sync`              | Scheduled-sync target (Vercel Cron).     |
 | POST   | `/api/demo`                   | Load sample data.                        |
 | POST   | `/api/reset`                  | Clear all stored data.                   |
 

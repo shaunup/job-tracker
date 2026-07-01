@@ -1,166 +1,134 @@
 // ---------------------------------------------------------------------------
-// db.js — SQLite persistence layer (better-sqlite3, synchronous & fast).
+// db.js — dependency-free JSON persistence layer.
+//
+// Deliberately avoids native modules (previously better-sqlite3) so the app
+// builds and runs everywhere, including serverless platforms like Vercel where
+// native binaries and writable project directories are unavailable.
+//
+// Storage location:
+//   - Local / persistent hosts: <repo>/data/jobtracker.json
+//   - Serverless (VERCEL) or read-only FS: /tmp/jobtracker/jobtracker.json
+//     (note: /tmp is per-instance and ephemeral — see README for durable setups)
 // ---------------------------------------------------------------------------
-import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const dataDir = path.join(__dirname, '..', 'data');
-fs.mkdirSync(dataDir, { recursive: true });
 
-const db = new Database(path.join(dataDir, 'jobtracker.sqlite'));
-db.pragma('journal_mode = WAL');
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS emails (
-    id            TEXT PRIMARY KEY,
-    thread_id     TEXT,
-    from_name     TEXT,
-    from_email    TEXT,
-    subject       TEXT,
-    snippet       TEXT,
-    body          TEXT,
-    received_at   INTEGER,
-    company       TEXT,
-    position      TEXT,
-    status        TEXT,
-    confidence    REAL,
-    is_job_related INTEGER DEFAULT 0,
-    created_at    INTEGER
-  );
-
-  CREATE TABLE IF NOT EXISTS jobs (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    job_key       TEXT UNIQUE,
-    company       TEXT,
-    position      TEXT,
-    status        TEXT,
-    first_seen    INTEGER,
-    last_update   INTEGER,
-    last_email_id TEXT,
-    email_count   INTEGER DEFAULT 0
-  );
-
-  CREATE TABLE IF NOT EXISTS settings (
-    key   TEXT PRIMARY KEY,
-    value TEXT
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_emails_company ON emails(company);
-  CREATE INDEX IF NOT EXISTS idx_emails_received ON emails(received_at);
-`);
-
-// --- settings helpers ------------------------------------------------------
-const _getSetting = db.prepare('SELECT value FROM settings WHERE key = ?');
-const _setSetting = db.prepare(
-  'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
-);
-const _delSetting = db.prepare('DELETE FROM settings WHERE key = ?');
-
-export function getSetting(key, fallback = null) {
-  const row = _getSetting.get(key);
-  if (!row) return fallback;
+function resolveDataDir() {
+  if (process.env.DATA_DIR) return process.env.DATA_DIR;
+  const preferred = path.join(__dirname, '..', 'data');
+  if (process.env.VERCEL || process.env.AWS_REGION) return '/tmp/jobtracker';
   try {
-    return JSON.parse(row.value);
+    fs.mkdirSync(preferred, { recursive: true });
+    fs.accessSync(preferred, fs.constants.W_OK);
+    return preferred;
   } catch {
-    return row.value;
+    return '/tmp/jobtracker';
   }
 }
 
+const dataDir = resolveDataDir();
+fs.mkdirSync(dataDir, { recursive: true });
+const dataFile = path.join(dataDir, 'jobtracker.json');
+
+const empty = () => ({ emails: {}, jobs: {}, settings: {} });
+
+let store;
+function load() {
+  try {
+    store = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
+    store.emails ||= {};
+    store.jobs ||= {};
+    store.settings ||= {};
+  } catch {
+    store = empty();
+  }
+}
+load();
+
+let saveQueued = false;
+function persist() {
+  // Coalesce rapid writes (e.g. during a sync) into a single flush.
+  if (saveQueued) return;
+  saveQueued = true;
+  queueMicrotask(() => {
+    saveQueued = false;
+    try {
+      fs.writeFileSync(dataFile, JSON.stringify(store));
+    } catch (e) {
+      console.warn('[db] failed to persist:', e.message);
+    }
+  });
+}
+
+// --- settings --------------------------------------------------------------
+export function getSetting(key, fallback = null) {
+  return key in store.settings ? store.settings[key] : fallback;
+}
 export function setSetting(key, value) {
-  _setSetting.run(key, JSON.stringify(value));
+  store.settings[key] = value;
+  persist();
 }
-
 export function deleteSetting(key) {
-  _delSetting.run(key);
+  delete store.settings[key];
+  persist();
 }
 
-// --- email helpers ---------------------------------------------------------
-const _upsertEmail = db.prepare(`
-  INSERT INTO emails (id, thread_id, from_name, from_email, subject, snippet, body,
-                      received_at, company, position, status, confidence, is_job_related, created_at)
-  VALUES (@id, @thread_id, @from_name, @from_email, @subject, @snippet, @body,
-          @received_at, @company, @position, @status, @confidence, @is_job_related, @created_at)
-  ON CONFLICT(id) DO UPDATE SET
-    company = excluded.company,
-    position = excluded.position,
-    status = excluded.status,
-    confidence = excluded.confidence,
-    is_job_related = excluded.is_job_related
-`);
-
+// --- emails ----------------------------------------------------------------
 export function upsertEmail(email) {
-  _upsertEmail.run(email);
+  const existing = store.emails[email.id];
+  store.emails[email.id] = existing ? { ...existing, ...email } : { ...email };
+  persist();
 }
-
 export function emailExists(id) {
-  return !!db.prepare('SELECT 1 FROM emails WHERE id = ?').get(id);
+  return id in store.emails;
 }
-
 export function getJobEmails() {
-  return db
-    .prepare('SELECT * FROM emails WHERE is_job_related = 1 ORDER BY received_at ASC')
-    .all();
+  return Object.values(store.emails)
+    .filter((e) => e.is_job_related === 1 || e.is_job_related === true)
+    .sort((a, b) => a.received_at - b.received_at);
 }
-
-export function getEmailsForJob(company, position) {
-  return db
-    .prepare(
-      'SELECT * FROM emails WHERE is_job_related = 1 AND company = ? AND position = ? ORDER BY received_at ASC'
-    )
-    .all(company, position);
-}
-
-// --- jobs helpers ----------------------------------------------------------
-export function clearJobs() {
-  db.prepare('DELETE FROM jobs').run();
-}
-
-const _upsertJob = db.prepare(`
-  INSERT INTO jobs (job_key, company, position, status, first_seen, last_update, last_email_id, email_count)
-  VALUES (@job_key, @company, @position, @status, @first_seen, @last_update, @last_email_id, @email_count)
-  ON CONFLICT(job_key) DO UPDATE SET
-    company = excluded.company,
-    position = excluded.position,
-    status = excluded.status,
-    first_seen = excluded.first_seen,
-    last_update = excluded.last_update,
-    last_email_id = excluded.last_email_id,
-    email_count = excluded.email_count
-`);
-
-export function upsertJob(job) {
-  _upsertJob.run(job);
-}
-
-export function getJobs() {
-  return db.prepare('SELECT * FROM jobs ORDER BY last_update DESC').all();
-}
-
-export function getJobByKey(jobKey) {
-  return db.prepare('SELECT * FROM jobs WHERE job_key = ?').get(jobKey);
-}
-
 export function getEmailsByKey(jobKey) {
-  return db
-    .prepare(
-      'SELECT * FROM emails WHERE is_job_related = 1 AND company = ? ORDER BY received_at ASC'
+  return Object.values(store.emails)
+    .filter(
+      (e) =>
+        (e.is_job_related === 1 || e.is_job_related === true) && e.company === jobKey
     )
-    .all(jobKey);
+    .sort((a, b) => a.received_at - b.received_at);
 }
 
+// --- jobs ------------------------------------------------------------------
+export function clearJobs() {
+  store.jobs = {};
+  persist();
+}
+export function upsertJob(job) {
+  store.jobs[job.job_key] = { ...job };
+  persist();
+}
+export function getJobs() {
+  return Object.values(store.jobs).sort((a, b) => b.last_update - a.last_update);
+}
+export function getJobByKey(jobKey) {
+  return store.jobs[jobKey] || null;
+}
+
+// --- maintenance -----------------------------------------------------------
 export function wipeAll() {
-  db.exec('DELETE FROM emails; DELETE FROM jobs;');
+  // Preserve settings (OAuth tokens) so the user stays connected.
+  store.emails = {};
+  store.jobs = {};
+  persist();
 }
-
 export function stats() {
+  const emails = Object.values(store.emails);
   return {
-    emails: db.prepare('SELECT COUNT(*) c FROM emails').get().c,
-    jobEmails: db.prepare('SELECT COUNT(*) c FROM emails WHERE is_job_related = 1').get().c,
-    jobs: db.prepare('SELECT COUNT(*) c FROM jobs').get().c,
+    emails: emails.length,
+    jobEmails: emails.filter((e) => e.is_job_related === 1 || e.is_job_related === true).length,
+    jobs: Object.keys(store.jobs).length,
   };
 }
 
-export default db;
+export default { load, dataFile };

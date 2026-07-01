@@ -140,6 +140,18 @@ app.post('/api/sync', async (req, res) => {
   }
 });
 
+// GET endpoint for scheduled syncs (e.g. Vercel Cron, which issues GET
+// requests). No-ops quietly when Gmail isn't connected.
+app.get('/api/cron/sync', async (req, res) => {
+  if (!isAuthenticated()) return res.json({ ok: true, skipped: 'not connected' });
+  try {
+    const result = await runSync();
+    res.json({ ok: true, ...result });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // --- demo & reset -----------------------------------------------------------
 app.post('/api/demo', (req, res) => {
   loadDemoData();
@@ -171,8 +183,13 @@ if (fs.existsSync(clientDist)) {
 }
 
 // --- automatic polling ------------------------------------------------------
+// On serverless platforms (e.g. Vercel) a long-lived timer can't run — a
+// scheduled request to /api/cron/sync is used instead (see vercel.json). On
+// persistent hosts we poll in-process.
+const isServerless = !!process.env.VERCEL;
 const intervalMinutes = Number(process.env.SYNC_INTERVAL_MINUTES || 10);
-if (intervalMinutes > 0) {
+
+if (!isServerless && intervalMinutes > 0) {
   setInterval(() => {
     if (isAuthenticated() && !syncState.running) {
       runSync()
@@ -182,8 +199,14 @@ if (intervalMinutes > 0) {
   }, intervalMinutes * 60 * 1000);
 }
 
-app.listen(PORT, () => {
-  console.log(`\n  Job Tracker running at http://localhost:${PORT}`);
-  console.log(`  Gmail OAuth configured: ${isConfigured() ? 'yes' : 'no (see README / .env)'}`);
-  if (intervalMinutes > 0) console.log(`  Auto-sync every ${intervalMinutes} min when connected.\n`);
-});
+// Only start an HTTP listener when running as a standalone server. Under
+// serverless the platform imports the exported `app` as a request handler.
+if (!isServerless) {
+  app.listen(PORT, () => {
+    console.log(`\n  Job Tracker running at http://localhost:${PORT}`);
+    console.log(`  Gmail OAuth configured: ${isConfigured() ? 'yes' : 'no (see README / .env)'}`);
+    if (intervalMinutes > 0) console.log(`  Auto-sync every ${intervalMinutes} min when connected.\n`);
+  });
+}
+
+export default app;
