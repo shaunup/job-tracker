@@ -20,8 +20,8 @@ function jobKey(company) {
  * Rebuild the jobs table from all job-related emails currently stored.
  * Returns the freshly computed job list.
  */
-export function rebuildJobs() {
-  const emails = getJobEmails();
+export async function rebuildJobs() {
+  const emails = await getJobEmails();
   const groups = new Map();
 
   for (const e of emails) {
@@ -30,7 +30,7 @@ export function rebuildJobs() {
     groups.get(key).push(e);
   }
 
-  clearJobs();
+  await clearJobs();
   const results = [];
 
   for (const [key, group] of groups) {
@@ -63,7 +63,7 @@ export function rebuildJobs() {
       last_email_id: (current || last).id,
       email_count: group.length,
     };
-    upsertJob(job);
+    await upsertJob(job);
     results.push(job);
   }
 

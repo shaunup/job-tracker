@@ -14,6 +14,7 @@ import {
   getSetting,
   stats,
   wipeAll,
+  storageName,
 } from './db.js';
 import { rebuildJobs } from './jobs.js';
 import { loadDemoData } from './demoData.js';
@@ -35,23 +36,34 @@ app.use(express.json());
 app.use(cookieParser());
 
 // --- status ----------------------------------------------------------------
-app.get('/api/status', (req, res) => {
-  res.json({
-    googleConfigured: isConfigured(),
-    connected: isAuthenticated(),
-    profile: getProfile(),
-    lastSync: getSetting('last_sync'),
-    stats: stats(),
-    syncing: syncState.running,
-  });
+app.get('/api/status', async (req, res) => {
+  try {
+    const [connected, profile, lastSync, s] = await Promise.all([
+      isAuthenticated(),
+      getProfile(),
+      getSetting('last_sync'),
+      stats(),
+    ]);
+    res.json({
+      googleConfigured: isConfigured(),
+      connected,
+      profile,
+      lastSync,
+      stats: s,
+      storage: storageName,
+      syncing: syncState.running,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // --- auth -------------------------------------------------------------------
-app.get('/api/auth/google', (req, res) => {
+app.get('/api/auth/google', async (req, res) => {
   if (!isConfigured()) {
     return res.status(400).json({ error: 'Google OAuth is not configured on the server.' });
   }
-  res.redirect(getAuthUrl());
+  res.redirect(await getAuthUrl());
 });
 
 app.get('/api/auth/google/callback', async (req, res) => {
@@ -69,14 +81,14 @@ app.get('/api/auth/google/callback', async (req, res) => {
   }
 });
 
-app.post('/api/auth/disconnect', (req, res) => {
-  disconnect();
+app.post('/api/auth/disconnect', async (req, res) => {
+  await disconnect();
   res.json({ ok: true });
 });
 
 // --- jobs & emails ----------------------------------------------------------
-app.get('/api/jobs', (req, res) => {
-  const jobs = getJobs();
+app.get('/api/jobs', async (req, res) => {
+  const jobs = await getJobs();
   const byStatus = jobs.reduce((acc, j) => {
     acc[j.status] = (acc[j.status] || 0) + 1;
     return acc;
@@ -94,8 +106,8 @@ app.get('/api/jobs', (req, res) => {
   });
 });
 
-app.get('/api/jobs/:key/emails', (req, res) => {
-  const emails = getEmailsByKey(req.params.key).map((e) => ({
+app.get('/api/jobs/:key/emails', async (req, res) => {
+  const emails = (await getEmailsByKey(req.params.key)).map((e) => ({
     id: e.id,
     subject: e.subject,
     from_name: e.from_name,
@@ -117,7 +129,7 @@ async function runSync() {
   syncState.lastError = null;
   try {
     const result = await syncGmail();
-    rebuildJobs();
+    await rebuildJobs();
     syncState.lastResult = result;
     return result;
   } catch (e) {
@@ -129,7 +141,7 @@ async function runSync() {
 }
 
 app.post('/api/sync', async (req, res) => {
-  if (!isAuthenticated()) {
+  if (!(await isAuthenticated())) {
     return res.status(400).json({ error: 'Not connected to Gmail. Connect your account first.' });
   }
   try {
@@ -143,7 +155,7 @@ app.post('/api/sync', async (req, res) => {
 // GET endpoint for scheduled syncs (e.g. Vercel Cron, which issues GET
 // requests). No-ops quietly when Gmail isn't connected.
 app.get('/api/cron/sync', async (req, res) => {
-  if (!isAuthenticated()) return res.json({ ok: true, skipped: 'not connected' });
+  if (!(await isAuthenticated())) return res.json({ ok: true, skipped: 'not connected' });
   try {
     const result = await runSync();
     res.json({ ok: true, ...result });
@@ -153,14 +165,14 @@ app.get('/api/cron/sync', async (req, res) => {
 });
 
 // --- demo & reset -----------------------------------------------------------
-app.post('/api/demo', (req, res) => {
-  loadDemoData();
-  const jobs = rebuildJobs();
+app.post('/api/demo', async (req, res) => {
+  await loadDemoData();
+  const jobs = await rebuildJobs();
   res.json({ ok: true, jobs: jobs.length });
 });
 
-app.post('/api/reset', (req, res) => {
-  wipeAll();
+app.post('/api/reset', async (req, res) => {
+  await wipeAll();
   res.json({ ok: true });
 });
 
@@ -190,8 +202,9 @@ const isServerless = !!process.env.VERCEL;
 const intervalMinutes = Number(process.env.SYNC_INTERVAL_MINUTES || 10);
 
 if (!isServerless && intervalMinutes > 0) {
-  setInterval(() => {
-    if (isAuthenticated() && !syncState.running) {
+  setInterval(async () => {
+    if (syncState.running) return;
+    if (await isAuthenticated()) {
       runSync()
         .then((r) => r && console.log(`[auto-sync] fetched ${r.fetched}, job-related ${r.jobRelated}`))
         .catch((e) => console.warn('[auto-sync] failed:', e.message));

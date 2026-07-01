@@ -13,27 +13,29 @@ export function isConfigured() {
   return !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
 }
 
-function oauthClient() {
+async function oauthClient() {
   const client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET,
     process.env.GOOGLE_REDIRECT_URI || 'http://localhost:4000/api/auth/google/callback'
   );
 
-  const tokens = getSetting(TOKEN_KEY);
+  const tokens = await getSetting(TOKEN_KEY);
   if (tokens) client.setCredentials(tokens);
 
-  // Persist refreshed tokens automatically.
+  // Persist refreshed tokens automatically (fire-and-forget).
   client.on('tokens', (t) => {
-    const existing = getSetting(TOKEN_KEY) || {};
-    setSetting(TOKEN_KEY, { ...existing, ...t });
+    (async () => {
+      const existing = (await getSetting(TOKEN_KEY)) || {};
+      await setSetting(TOKEN_KEY, { ...existing, ...t });
+    })().catch((e) => console.warn('[gmail] token persist failed:', e.message));
   });
 
   return client;
 }
 
-export function getAuthUrl() {
-  const client = oauthClient();
+export async function getAuthUrl() {
+  const client = await oauthClient();
   return client.generateAuthUrl({
     access_type: 'offline',
     prompt: 'consent',
@@ -42,31 +44,31 @@ export function getAuthUrl() {
 }
 
 export async function handleCallback(code) {
-  const client = oauthClient();
+  const client = await oauthClient();
   const { tokens } = await client.getToken(code);
-  setSetting(TOKEN_KEY, tokens);
+  await setSetting(TOKEN_KEY, tokens);
   client.setCredentials(tokens);
 
   try {
     const oauth2 = google.oauth2({ version: 'v2', auth: client });
     const { data } = await oauth2.userinfo.get();
-    setSetting(PROFILE_KEY, { email: data.email, name: data.name, picture: data.picture });
+    await setSetting(PROFILE_KEY, { email: data.email, name: data.name, picture: data.picture });
   } catch {
     /* profile is best-effort */
   }
 }
 
-export function isAuthenticated() {
-  return !!getSetting(TOKEN_KEY);
+export async function isAuthenticated() {
+  return !!(await getSetting(TOKEN_KEY));
 }
 
 export function getProfile() {
   return getSetting(PROFILE_KEY);
 }
 
-export function disconnect() {
-  deleteSetting(TOKEN_KEY);
-  deleteSetting(PROFILE_KEY);
+export async function disconnect() {
+  await deleteSetting(TOKEN_KEY);
+  await deleteSetting(PROFILE_KEY);
 }
 
 // --- message parsing -------------------------------------------------------
@@ -118,9 +120,9 @@ const SEARCH_QUERY =
  */
 export async function syncGmail({ onEmail } = {}) {
   if (!isConfigured()) throw new Error('Google OAuth is not configured.');
-  if (!isAuthenticated()) throw new Error('Not connected to Gmail.');
+  if (!(await isAuthenticated())) throw new Error('Not connected to Gmail.');
 
-  const client = oauthClient();
+  const client = await oauthClient();
   const gmail = google.gmail({ version: 'v1', auth: client });
 
   const lookbackDays = Number(process.env.SYNC_LOOKBACK_DAYS || 365);
@@ -171,7 +173,7 @@ export async function syncGmail({ onEmail } = {}) {
       };
       const c = classifyEmail(emailInput);
 
-      upsertEmail({
+      await upsertEmail({
         id: msg.id,
         thread_id: msg.threadId,
         from_name: from.name,
@@ -194,6 +196,6 @@ export async function syncGmail({ onEmail } = {}) {
     }
   } while (pageToken && fetched < maxMessages);
 
-  setSetting('last_sync', Date.now());
+  await setSetting('last_sync', Date.now());
   return { fetched, jobRelated };
 }

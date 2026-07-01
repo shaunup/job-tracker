@@ -29,13 +29,14 @@ its new status automatically — so the board is always up to date.
 
 ## Tech stack
 
-| Layer     | Choice                                        |
-| --------- | --------------------------------------------- |
-| Backend   | Node.js + Express                             |
-| Data      | Dependency-free JSON store (no native modules) |
-| Gmail     | `googleapis` (OAuth 2.0, `gmail.readonly`)    |
-| Frontend  | React + Vite (custom CSS design system)       |
-| Deploy    | Vercel (serverless) **or** Render/Railway/Fly (persistent) |
+| Layer     | Choice                                                       |
+| --------- | ------------------------------------------------------------ |
+| Hosting   | **Vercel** (static client + serverless API in `/api`)        |
+| Backend   | Node.js + Express (runs as a Vercel Serverless Function)     |
+| Data      | **Vercel KV / Upstash Redis** (JSON-file fallback for local dev) |
+| Gmail     | `googleapis` (OAuth 2.0, `gmail.readonly`)                   |
+| Frontend  | React + Vite (custom CSS design system)                      |
+| Auto-sync | Vercel Cron + in-browser background refresh                  |
 
 ---
 
@@ -96,45 +97,59 @@ your machine. The scope is **read-only** — the app can never send or delete ma
 
 ---
 
-## Deploying
+## Deploy to Vercel
 
-The app ships with config for both a serverless and a persistent host.
+This project is built for Vercel. `vercel.json` tells Vercel to build the Vite
+client, serve it as static files, and run the Express API as a Serverless
+Function at `api/index.js` (all `/api/*` requests are rewritten to it).
 
-### Option A — Vercel (serverless)
+### 1. Create the storage (required)
 
-`vercel.json` is included: it builds the Vite client, serves it as static files,
-and runs the Express API as a serverless function (`api/index.js`). The `/api/*`
-routes are rewritten to that function.
+Vercel's filesystem is ephemeral, so data must live in an external store. Add a
+free Redis database — it takes ~1 minute:
 
-1. Import the repo into Vercel.
-2. In **Project → Settings → Environment Variables**, add:
-   - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
-   - `GOOGLE_REDIRECT_URI = https://<your-project>.vercel.app/api/auth/google/callback`
-3. Add that exact redirect URI to your Google Cloud OAuth client.
-4. Redeploy, then click **Connect Gmail**.
+1. In your Vercel **Project → Storage → Create Database**, choose **Upstash for
+   Redis** (from the Marketplace) and connect it to the project.
+2. Vercel injects `KV_REST_API_URL` and `KV_REST_API_TOKEN` (and/or
+   `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN`) as environment
+   variables automatically. The app auto-detects them — no code changes needed.
 
-A daily [Vercel Cron](https://vercel.com/docs/cron-jobs) hit to `/api/cron/sync`
-refreshes statuses automatically (the **Sync now** button triggers it instantly
-any time). On the Pro plan you can increase the cron frequency in `vercel.json`.
+> If no Redis is configured, the app still runs but stores data in the ephemeral
+> `/tmp` filesystem, which resets on cold starts (fine for a quick demo only).
 
-> **Serverless persistence caveat:** Vercel functions have an ephemeral, per-
-> instance `/tmp` filesystem, so stored emails and your Gmail connection can
-> reset on cold starts. This is fine for trying the app, but for durable,
-> always-fresh tracking use a persistent host (below).
+### 2. Add the Google OAuth env vars
 
-### Option B — Render / Railway / Fly (persistent, recommended for real use)
+In **Project → Settings → Environment Variables** add:
 
-A `render.yaml` blueprint is included. A single long-lived process means the
-built-in **auto-sync polling** (`SYNC_INTERVAL_MINUTES`) works continuously and,
-with a mounted disk (`DATA_DIR`), your data persists across restarts.
+| Variable               | Value                                                            |
+| ---------------------- | ---------------------------------------------------------------- |
+| `GOOGLE_CLIENT_ID`     | your OAuth client id                                             |
+| `GOOGLE_CLIENT_SECRET` | your OAuth client secret                                         |
+| `GOOGLE_REDIRECT_URI`  | `https://<your-project>.vercel.app/api/auth/google/callback`     |
 
-1. Push to GitHub → in Render pick **New + → Blueprint** and select the repo.
-2. Provide the `GOOGLE_*` env vars and set `GOOGLE_REDIRECT_URI` to
-   `https://<service>.onrender.com/api/auth/google/callback`.
-3. Add that redirect URI to your Google Cloud OAuth client, then **Connect Gmail**.
+Then add that **exact** redirect URI to your Google Cloud OAuth client (see the
+"Connecting Gmail" section above).
 
-The same setup works on Railway, Fly.io, a VPS, or Docker — anywhere you can run
-`npm start` as a persistent process.
+### 3. Deploy & connect
+
+Push to GitHub and import the repo into Vercel (or run `vercel`). After it
+deploys, open the app and click **Connect Gmail**.
+
+### How auto-updating works on Vercel
+
+Serverless functions can't run a persistent background timer, so the app keeps
+statuses fresh two ways:
+
+- **Vercel Cron** hits `GET /api/cron/sync` on a schedule (configured in
+  `vercel.json`; Hobby plans allow a daily cron, Pro allows more frequent —
+  just edit the `schedule`).
+- **In-browser refresh** — while the dashboard tab is open and connected, it
+  triggers a sync every few minutes so new emails move jobs to their new status
+  automatically. The **Sync now** button forces an immediate refresh any time.
+
+> **Function duration:** the very first sync of a large inbox can be slow.
+> `vercel.json` sets `maxDuration` to 60s; if an initial sync times out, just
+> click **Sync now** again — already-imported emails are skipped, so it resumes.
 
 ## How status detection works
 
@@ -160,14 +175,17 @@ recruiters use in your industry.
 
 ## Configuration reference
 
-| Variable                | Default                                             | Description                                        |
-| ----------------------- | --------------------------------------------------- | -------------------------------------------------- |
-| `PORT`                  | `4000`                                               | Server port (also serves the built dashboard).     |
-| `GOOGLE_CLIENT_ID`      | —                                                    | Google OAuth client ID.                            |
-| `GOOGLE_CLIENT_SECRET`  | —                                                    | Google OAuth client secret.                        |
-| `GOOGLE_REDIRECT_URI`   | `http://localhost:4000/api/auth/google/callback`     | Must match the URI registered in Google Cloud.     |
-| `SYNC_INTERVAL_MINUTES` | `10`                                                 | How often to auto-poll Gmail (`0` disables it).    |
-| `SYNC_LOOKBACK_DAYS`    | `365`                                                | How far back to search Gmail.                      |
+| Variable                                    | Default                                          | Description                                                     |
+| ------------------------------------------- | ------------------------------------------------ | --------------------------------------------------------------- |
+| `GOOGLE_CLIENT_ID`                          | —                                                | Google OAuth client ID.                                         |
+| `GOOGLE_CLIENT_SECRET`                      | —                                                | Google OAuth client secret.                                     |
+| `GOOGLE_REDIRECT_URI`                       | `http://localhost:4000/api/auth/google/callback` | Must match the URI registered in Google Cloud.                  |
+| `KV_REST_API_URL` / `KV_REST_API_TOKEN`     | — (set by Vercel KV)                             | Durable Redis storage. Injected by the Upstash/Vercel KV integration. |
+| `UPSTASH_REDIS_REST_URL` / `..._TOKEN`      | —                                                | Alternative Redis credentials (standalone Upstash).             |
+| `SYNC_LOOKBACK_DAYS`                        | `365`                                            | How far back to search Gmail.                                   |
+| `SYNC_INTERVAL_MINUTES`                     | `10`                                             | In-process poll interval (used only when running as a persistent server, not on Vercel). |
+| `DATA_DIR`                                  | `./data`                                         | JSON-store path when Redis isn't configured (local dev only).   |
+| `PORT`                                      | `4000`                                           | Port for the standalone server (`npm start`).                   |
 
 ---
 

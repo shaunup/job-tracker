@@ -171,6 +171,21 @@ export default function App() {
     return () => clearInterval(t);
   }, [status?.syncing, refresh]);
 
+  // While the dashboard is open and Gmail is connected, sync in the background
+  // every few minutes. This keeps statuses fresh on Vercel, where a long-lived
+  // server-side timer can't run — the browser drives the refresh instead.
+  useEffect(() => {
+    if (!status?.connected) return;
+    const t = setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      api
+        .sync()
+        .then(() => refresh())
+        .catch(() => {});
+    }, 5 * 60 * 1000);
+    return () => clearInterval(t);
+  }, [status?.connected, refresh]);
+
   const doSync = async () => {
     setBusy(true);
     try {

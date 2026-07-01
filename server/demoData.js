@@ -38,9 +38,10 @@ const SAMPLES = [
   { d: 2, from: 'Weekly Newsletter <news@techcrunch.com>', subject: 'This week in tech: funding rounds and product launches', body: 'Here is your weekly roundup of the biggest stories in technology and startups.' },
 ];
 
-export function loadDemoData() {
+export async function loadDemoData() {
   let inserted = 0;
-  SAMPLES.forEach((s, i) => {
+  for (let i = 0; i < SAMPLES.length; i++) {
+    const s = SAMPLES[i];
     const receivedAt = now - s.d * DAY;
     const fromMatch = s.from.match(/^(.*?)\s*<([^>]+)>$/);
     const fromName = fromMatch ? fromMatch[1].replace(/"/g, '').trim() : '';
@@ -49,7 +50,7 @@ export function loadDemoData() {
     const emailInput = { subject: s.subject, snippet: s.body, body: s.body, fromName, fromEmail };
     const c = classifyEmail(emailInput);
 
-    upsertEmail({
+    await upsertEmail({
       id: `demo-${i}-${receivedAt}`,
       thread_id: `demo-thread-${c.company}`,
       from_name: fromName,
@@ -66,6 +67,6 @@ export function loadDemoData() {
       created_at: Date.now(),
     });
     inserted += 1;
-  });
+  }
   return inserted;
 }
