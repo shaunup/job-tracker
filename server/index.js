@@ -68,16 +68,23 @@ app.get('/api/auth/google', async (req, res) => {
 
 app.get('/api/auth/google/callback', async (req, res) => {
   const { code, error } = req.query;
-  if (error) return res.redirect('/?auth=error');
-  if (!code) return res.redirect('/?auth=missing_code');
+  if (error) return res.redirect('/?auth=error&reason=' + encodeURIComponent(String(error)));
+  if (!code) return res.redirect('/?auth=error&reason=missing_code');
   try {
     await handleCallback(String(code));
     // Kick off an initial sync in the background.
     runSync().catch(() => {});
     res.redirect('/?auth=success');
   } catch (e) {
-    console.error('OAuth callback failed:', e.message);
-    res.redirect('/?auth=error');
+    // Surface the specific reason so setup problems are debuggable. Google API
+    // errors carry structured details on e.response.data.
+    const detail =
+      e?.response?.data?.error_description ||
+      e?.response?.data?.error ||
+      e?.message ||
+      'unknown_error';
+    console.error('OAuth callback failed:', detail, e?.response?.data || '');
+    res.redirect('/?auth=error&reason=' + encodeURIComponent(detail));
   }
 });
 

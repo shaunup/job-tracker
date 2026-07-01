@@ -141,9 +141,9 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState(null);
 
-  const notify = (msg, kind = 'info') => {
+  const notify = (msg, kind = 'info', duration = 4000) => {
     setToast({ msg, kind });
-    setTimeout(() => setToast(null), 4000);
+    setTimeout(() => setToast(null), duration);
   };
 
   const refresh = useCallback(async () => {
@@ -159,7 +159,12 @@ export default function App() {
       notify('Gmail connected! Syncing your inbox…', 'success');
       window.history.replaceState({}, '', '/');
     } else if (params.get('auth') === 'error') {
-      notify('Google sign-in failed. Check your OAuth setup.', 'error');
+      const reason = params.get('reason');
+      notify(
+        reason ? `Google sign-in failed: ${reason}` : 'Google sign-in failed. Check your OAuth setup.',
+        'error',
+        reason ? 12000 : 4000
+      );
       window.history.replaceState({}, '', '/');
     }
   }, [refresh]);
@@ -191,9 +196,20 @@ export default function App() {
     try {
       const r = await api.sync();
       await refresh();
-      notify(`Sync complete — ${r.jobRelated} job emails found.`, 'success');
+      if (r && r.done === false) {
+        notify(
+          `Imported a batch (${r.remaining} emails left). Click Sync again to continue.`,
+          'info',
+          8000
+        );
+      } else {
+        notify('Sync complete — your applications are up to date.', 'success');
+      }
     } catch (e) {
-      notify(e.message, 'error');
+      const msg = /timed out|aborted/i.test(e.message)
+        ? 'Sync is taking a while on a large inbox. It keeps running in batches — click Sync now again to continue.'
+        : e.message;
+      notify(msg, 'error', 9000);
     } finally {
       setBusy(false);
     }
@@ -238,7 +254,7 @@ export default function App() {
       const q = search.toLowerCase();
       jobs = jobs.filter(
         (j) =>
-          j.company.toLowerCase().includes(q) ||
+          (j.company || '').toLowerCase().includes(q) ||
           (j.position || '').toLowerCase().includes(q)
       );
     }
@@ -358,10 +374,10 @@ export default function App() {
               <button className="job-row" key={job.job_key} onClick={() => setSelected(job)}>
                 <div className="job-main">
                   <div className="job-logo" style={{ '--c': (STATUS_META[job.status] || {}).color }}>
-                    {job.company.charAt(0).toUpperCase()}
+                    {(job.company || '?').charAt(0).toUpperCase()}
                   </div>
                   <div>
-                    <div className="job-company">{job.company}</div>
+                    <div className="job-company">{job.company || 'Unknown'}</div>
                     <div className="job-position">{job.position || 'Position not specified'}</div>
                   </div>
                 </div>

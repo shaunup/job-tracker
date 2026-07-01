@@ -38,6 +38,7 @@ export const getSetting = (...a) => store.getSetting(...a);
 export const setSetting = (...a) => store.setSetting(...a);
 export const deleteSetting = (...a) => store.deleteSetting(...a);
 export const upsertEmail = (...a) => store.upsertEmail(...a);
+export const getEmailIds = (...a) => store.getEmailIds(...a);
 export const getJobEmails = (...a) => store.getJobEmails(...a);
 export const getEmailsByKey = (...a) => store.getEmailsByKey(...a);
 export const clearJobs = (...a) => store.clearJobs(...a);

@@ -50,6 +50,9 @@ export function createRedisStore({ url, token }) {
       const merged = existingRaw ? { ...parse(existingRaw), ...email } : email;
       await redis.hset(E, { [email.id]: JSON.stringify(merged) });
     },
+    async getEmailIds() {
+      return (await redis.hkeys(E)) || [];
+    },
     async getJobEmails() {
       const all = values(await redis.hgetall(E));
       return all.filter(isJob).sort((a, b) => a.received_at - b.received_at);
