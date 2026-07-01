@@ -141,9 +141,9 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState(null);
 
-  const notify = (msg, kind = 'info') => {
+  const notify = (msg, kind = 'info', duration = 4000) => {
     setToast({ msg, kind });
-    setTimeout(() => setToast(null), 4000);
+    setTimeout(() => setToast(null), duration);
   };
 
   const refresh = useCallback(async () => {
@@ -159,7 +159,12 @@ export default function App() {
       notify('Gmail connected! Syncing your inbox…', 'success');
       window.history.replaceState({}, '', '/');
     } else if (params.get('auth') === 'error') {
-      notify('Google sign-in failed. Check your OAuth setup.', 'error');
+      const reason = params.get('reason');
+      notify(
+        reason ? `Google sign-in failed: ${reason}` : 'Google sign-in failed. Check your OAuth setup.',
+        'error',
+        reason ? 12000 : 4000
+      );
       window.history.replaceState({}, '', '/');
     }
   }, [refresh]);

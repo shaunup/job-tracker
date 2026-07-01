@@ -5,7 +5,11 @@ import { google } from 'googleapis';
 import { getSetting, setSetting, deleteSetting, upsertEmail } from './db.js';
 import { classifyEmail } from './classifier.js';
 
-const SCOPES = ['https://www.googleapis.com/auth/gmail.readonly'];
+const SCOPES = [
+  'https://www.googleapis.com/auth/gmail.readonly',
+  'https://www.googleapis.com/auth/userinfo.email',
+  'https://www.googleapis.com/auth/userinfo.profile',
+];
 const TOKEN_KEY = 'google_tokens';
 const PROFILE_KEY = 'google_profile';
 
