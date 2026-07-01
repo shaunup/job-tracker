@@ -2,7 +2,7 @@
 // gmail.js — Google OAuth 2.0 flow + Gmail message sync.
 // ---------------------------------------------------------------------------
 import { google } from 'googleapis';
-import { getSetting, setSetting, deleteSetting, upsertEmail } from './db.js';
+import { getSetting, setSetting, deleteSetting, upsertEmail, getEmailIds } from './db.js';
 import { classifyEmail } from './classifier.js';
 
 const SCOPES = [
@@ -122,7 +122,19 @@ const SEARCH_QUERY =
  * Fetch job-related messages from Gmail, classify them, and persist. Returns a
  * summary of the sync run.
  */
-export async function syncGmail({ onEmail } = {}) {
+async function runWithConcurrency(items, limit, worker, shouldStop) {
+  let idx = 0;
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (idx < items.length) {
+      if (shouldStop && shouldStop()) return;
+      const current = items[idx++];
+      await worker(current);
+    }
+  });
+  await Promise.all(runners);
+}
+
+export async function syncGmail() {
   if (!isConfigured()) throw new Error('Google OAuth is not configured.');
   if (!(await isAuthenticated())) throw new Error('Not connected to Gmail.');
 
@@ -132,12 +144,19 @@ export async function syncGmail({ onEmail } = {}) {
   const lookbackDays = Number(process.env.SYNC_LOOKBACK_DAYS || 365);
   const query = `${SEARCH_QUERY} newer_than:${lookbackDays}d`;
 
-  let pageToken;
-  let fetched = 0;
-  let jobRelated = 0;
-  const seen = new Set();
-  const maxMessages = 500; // safety cap per run
+  // Serverless functions have a hard time limit, so bound the work: gather a
+  // page of candidate ids, skip anything we already stored, then fetch the rest
+  // concurrently until we run low on time. Unfinished work is picked up by the
+  // next sync (manual, cron, or the in-browser timer).
+  const timeBudgetMs = Number(process.env.SYNC_TIME_BUDGET_MS || 40000);
+  const maxCandidates = Number(process.env.SYNC_MAX_CANDIDATES || 800);
+  const concurrency = Number(process.env.SYNC_CONCURRENCY || 12);
+  const startedAt = Date.now();
+  const overBudget = () => Date.now() - startedAt > timeBudgetMs;
 
+  // 1) Collect candidate message ids.
+  const candidateIds = [];
+  let pageToken;
   do {
     const list = await gmail.users.messages.list({
       userId: 'me',
@@ -145,19 +164,38 @@ export async function syncGmail({ onEmail } = {}) {
       maxResults: 100,
       pageToken,
     });
-    const messages = list.data.messages || [];
+    for (const m of list.data.messages || []) candidateIds.push(m.id);
     pageToken = list.data.nextPageToken;
+  } while (pageToken && candidateIds.length < maxCandidates && !overBudget());
 
-    for (const { id } of messages) {
-      if (seen.has(id) || fetched >= maxMessages) continue;
-      seen.add(id);
+  // 2) Skip messages already stored so repeat syncs are fast/incremental.
+  const existing = new Set(await getEmailIds());
+  const toFetch = candidateIds.filter((id) => !existing.has(id));
 
-      const full = await gmail.users.messages.get({
-        userId: 'me',
-        id,
-        format: 'full',
-      });
-      const msg = full.data;
+  // 3) Fetch + classify + persist concurrently, within the time budget.
+  let fetched = 0;
+  let jobRelated = 0;
+  let processed = 0;
+
+  await runWithConcurrency(
+    toFetch,
+    concurrency,
+    async (id) => {
+      let msg;
+      try {
+        const full = await gmail.users.messages.get({
+          userId: 'me',
+          id,
+          format: 'metadata',
+          metadataHeaders: ['From', 'Subject', 'Date'],
+        });
+        msg = full.data;
+      } catch (e) {
+        console.warn('[sync] failed to fetch message', id, e.message);
+        processed += 1;
+        return;
+      }
+
       const headers = msg.payload?.headers || [];
       const from = parseFrom(header(headers, 'From'));
       const subject = header(headers, 'Subject');
@@ -168,10 +206,11 @@ export async function syncGmail({ onEmail } = {}) {
         ? Date.parse(dateHeader)
         : Date.now();
 
+      const snippet = msg.snippet || '';
       const emailInput = {
         subject,
-        snippet: msg.snippet || '',
-        body: extractBody(msg.payload),
+        snippet,
+        body: snippet,
         fromName: from.name,
         fromEmail: from.email,
       };
@@ -183,8 +222,8 @@ export async function syncGmail({ onEmail } = {}) {
         from_name: from.name,
         from_email: from.email,
         subject,
-        snippet: msg.snippet || '',
-        body: emailInput.body.slice(0, 20000),
+        snippet,
+        body: snippet.slice(0, 2000),
         received_at: receivedAt,
         company: c.company,
         position: c.position,
@@ -195,11 +234,13 @@ export async function syncGmail({ onEmail } = {}) {
       });
 
       fetched += 1;
+      processed += 1;
       if (c.isJobRelated) jobRelated += 1;
-      if (onEmail) onEmail();
-    }
-  } while (pageToken && fetched < maxMessages);
+    },
+    overBudget
+  );
 
   await setSetting('last_sync', Date.now());
-  return { fetched, jobRelated };
+  const remaining = toFetch.length - processed;
+  return { fetched, jobRelated, remaining, done: remaining <= 0 };
 }

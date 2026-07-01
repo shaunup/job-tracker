@@ -73,6 +73,9 @@ export function createJsonStore() {
       store.emails[email.id] = existing ? { ...existing, ...email } : { ...email };
       persist();
     },
+    async getEmailIds() {
+      return Object.keys(store.emails);
+    },
     async getJobEmails() {
       return Object.values(store.emails)
         .filter(isJob)
