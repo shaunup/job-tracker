@@ -83,6 +83,8 @@ code { background: rgba(255,255,255,.08); padding: 1px 6px; border-radius: 6px; 
 
 .pill { padding: 8px 14px; border-radius: 999px; font-size: 12.5px; font-weight: 600; }
 .pill-warn { background: rgba(245, 158, 11, .14); color: #f7c66b; border: 1px solid rgba(245,158,11,.3); }
+.pill-ai { background: rgba(139, 92, 246, .16); color: #c4b5fd; border: 1px solid rgba(139,92,246,.4); }
+.pill-muted { background: var(--panel-2); color: var(--muted); border: 1px solid var(--border); }
 
 /* ---------- main ---------- */
 .main { max-width: 1120px; margin: 0 auto; padding: 28px; }

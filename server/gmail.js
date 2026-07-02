@@ -4,6 +4,7 @@
 import { google } from 'googleapis';
 import { getSetting, setSetting, deleteSetting, upsertEmail, getEmailIds } from './db.js';
 import { classifyEmail } from './classifier.js';
+import { isLlmEnabled, classifyBatchLlm, llmModel } from './llm.js';
 
 const SCOPES = [
   'https://www.googleapis.com/auth/gmail.readonly',
@@ -134,6 +135,12 @@ async function runWithConcurrency(items, limit, worker, shouldStop) {
   await Promise.all(runners);
 }
 
+function chunk(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
 export async function syncGmail() {
   if (!isConfigured()) throw new Error('Google OAuth is not configured.');
   if (!(await isAuthenticated())) throw new Error('Not connected to Gmail.');
@@ -144,15 +151,13 @@ export async function syncGmail() {
   const lookbackDays = Number(process.env.SYNC_LOOKBACK_DAYS || 365);
   const query = `${SEARCH_QUERY} newer_than:${lookbackDays}d`;
 
-  // Serverless functions have a hard time limit, so bound the work: gather a
-  // page of candidate ids, skip anything we already stored, then fetch the rest
-  // concurrently until we run low on time. Unfinished work is picked up by the
-  // next sync (manual, cron, or the in-browser timer).
-  const timeBudgetMs = Number(process.env.SYNC_TIME_BUDGET_MS || 40000);
-  const maxCandidates = Number(process.env.SYNC_MAX_CANDIDATES || 800);
+  const llmOn = isLlmEnabled();
+  const maxCandidates = Number(process.env.SYNC_MAX_CANDIDATES || 1000);
   const concurrency = Number(process.env.SYNC_CONCURRENCY || 12);
-  const startedAt = Date.now();
-  const overBudget = () => Date.now() - startedAt > timeBudgetMs;
+  // Bound how many *new* messages we fully process per run so we finish inside
+  // the serverless time limit. LLM calls are slower, so process fewer per pass;
+  // remaining work is picked up by the next sync.
+  const maxPerRun = Number(process.env.SYNC_MAX_PER_RUN || (llmOn ? 40 : 250));
 
   // 1) Collect candidate message ids.
   const candidateIds = [];
@@ -166,81 +171,85 @@ export async function syncGmail() {
     });
     for (const m of list.data.messages || []) candidateIds.push(m.id);
     pageToken = list.data.nextPageToken;
-  } while (pageToken && candidateIds.length < maxCandidates && !overBudget());
+  } while (pageToken && candidateIds.length < maxCandidates);
 
   // 2) Skip messages already stored so repeat syncs are fast/incremental.
   const existing = new Set(await getEmailIds());
   const toFetch = candidateIds.filter((id) => !existing.has(id));
+  const batchIds = toFetch.slice(0, maxPerRun);
 
-  // 3) Fetch + classify + persist concurrently, within the time budget.
-  let fetched = 0;
-  let jobRelated = 0;
-  let processed = 0;
-
-  await runWithConcurrency(
-    toFetch,
-    concurrency,
-    async (id) => {
-      let msg;
-      try {
-        const full = await gmail.users.messages.get({
-          userId: 'me',
-          id,
-          format: 'metadata',
-          metadataHeaders: ['From', 'Subject', 'Date'],
-        });
-        msg = full.data;
-      } catch (e) {
-        console.warn('[sync] failed to fetch message', id, e.message);
-        processed += 1;
-        return;
-      }
-
+  // 3) Fetch full messages concurrently.
+  const inputs = [];
+  await runWithConcurrency(batchIds, concurrency, async (id) => {
+    try {
+      const full = await gmail.users.messages.get({ userId: 'me', id, format: 'full' });
+      const msg = full.data;
       const headers = msg.payload?.headers || [];
       const from = parseFrom(header(headers, 'From'));
-      const subject = header(headers, 'Subject');
       const dateHeader = header(headers, 'Date');
-      const receivedAt = msg.internalDate
-        ? Number(msg.internalDate)
-        : dateHeader
-        ? Date.parse(dateHeader)
-        : Date.now();
-
-      const snippet = msg.snippet || '';
-      const emailInput = {
-        subject,
-        snippet,
-        body: snippet,
-        fromName: from.name,
-        fromEmail: from.email,
-      };
-      const c = classifyEmail(emailInput);
-
-      await upsertEmail({
+      inputs.push({
         id: msg.id,
         thread_id: msg.threadId,
-        from_name: from.name,
-        from_email: from.email,
-        subject,
-        snippet,
-        body: snippet.slice(0, 2000),
-        received_at: receivedAt,
-        company: c.company,
-        position: c.position,
-        status: c.status,
-        confidence: c.confidence,
-        is_job_related: c.isJobRelated ? 1 : 0,
-        created_at: Date.now(),
+        subject: header(headers, 'Subject'),
+        snippet: msg.snippet || '',
+        body: extractBody(msg.payload),
+        fromName: from.name,
+        fromEmail: from.email,
+        received_at: msg.internalDate
+          ? Number(msg.internalDate)
+          : dateHeader
+          ? Date.parse(dateHeader)
+          : Date.now(),
       });
+    } catch (e) {
+      console.warn('[sync] failed to fetch message', id, e.message);
+    }
+  });
 
-      fetched += 1;
-      processed += 1;
-      if (c.isJobRelated) jobRelated += 1;
-    },
-    overBudget
-  );
+  // 4) Classify — LLM (batched) when enabled, else heuristic. Any LLM failure
+  //    falls back to the heuristic so a sync never breaks.
+  let llmResults = new Map();
+  if (llmOn && inputs.length) {
+    for (const group of chunk(inputs, 15)) {
+      try {
+        const res = await classifyBatchLlm(group);
+        for (const [k, v] of res) llmResults.set(k, v);
+      } catch (e) {
+        console.warn('[sync] LLM classification failed, using heuristic:', e.message);
+      }
+    }
+  }
+
+  // 5) Persist.
+  let jobRelated = 0;
+  for (const e of inputs) {
+    const c = llmResults.get(e.id) || classifyEmail(e);
+    await upsertEmail({
+      id: e.id,
+      thread_id: e.thread_id,
+      from_name: e.fromName,
+      from_email: e.fromEmail,
+      subject: e.subject,
+      snippet: e.snippet,
+      body: String(e.body || '').slice(0, 20000),
+      received_at: e.received_at,
+      company: c.company,
+      position: c.position,
+      status: c.status,
+      confidence: c.confidence,
+      is_job_related: c.isJobRelated ? 1 : 0,
+      created_at: Date.now(),
+    });
+    if (c.isJobRelated) jobRelated += 1;
+  }
 
   await setSetting('last_sync', Date.now());
-  const remaining = toFetch.length - processed;
-  return { fetched, jobRelated, remaining, done: remaining <= 0 };
+  const remaining = toFetch.length - batchIds.length;
+  return {
+    fetched: inputs.length,
+    jobRelated,
+    remaining,
+    done: remaining <= 0,
+    classifier: llmOn ? `ai (${llmModel()})` : 'heuristic',
+  };
 }

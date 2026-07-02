@@ -27,6 +27,7 @@ import {
   disconnect,
   syncGmail,
 } from './gmail.js';
+import { isLlmEnabled, llmModel } from './llm.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -51,6 +52,7 @@ app.get('/api/status', async (req, res) => {
       lastSync,
       stats: s,
       storage: storageName,
+      classifier: isLlmEnabled() ? `ai (${llmModel()})` : 'heuristic keywords',
       syncing: syncState.running,
     });
   } catch (e) {

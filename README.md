@@ -151,6 +151,25 @@ statuses fresh two ways:
 > `vercel.json` sets `maxDuration` to 60s; if an initial sync times out, just
 > click **Sync now** again — already-imported emails are skipped, so it resumes.
 
+## AI classification (recommended)
+
+By default the app uses a built-in **keyword classifier**. For much higher
+accuracy, add an OpenAI-compatible API key and it will use an **LLM** to read
+each email and determine its stage, company, and role.
+
+1. In Vercel → **Project → Settings → Environment Variables**, add:
+   - `OPENAI_API_KEY` — your key (from platform.openai.com or any OpenAI-
+     compatible provider).
+   - *(optional)* `OPENAI_MODEL` (default `gpt-4o-mini`), `OPENAI_BASE_URL`.
+2. **Redeploy.**
+3. The header shows **"✨ AI classifier"** when it's active (vs. "Keyword
+   classifier").
+
+To re-classify emails you already imported with the old classifier, click
+**Clear data**, then **Sync now** (repeat until it reports it's finished — the
+AI processes a batch per sync to stay within serverless time limits). Your
+Gmail connection is preserved when you clear data.
+
 ## How status detection works
 
 Each email is passed through [`server/classifier.js`](server/classifier.js),
@@ -182,7 +201,10 @@ recruiters use in your industry.
 | `GOOGLE_REDIRECT_URI`                       | `http://localhost:4000/api/auth/google/callback` | Must match the URI registered in Google Cloud.                  |
 | `KV_REST_API_URL` / `KV_REST_API_TOKEN`     | — (set by Vercel KV)                             | Durable Redis storage. Injected by the Upstash/Vercel KV integration. |
 | `UPSTASH_REDIS_REST_URL` / `..._TOKEN`      | —                                                | Alternative Redis credentials (standalone Upstash).             |
+| `OPENAI_API_KEY`                            | —                                                | Enables the AI classifier. Unset = keyword classifier.          |
+| `OPENAI_MODEL` / `OPENAI_BASE_URL`          | `gpt-4o-mini` / OpenAI                           | AI model and (optional) OpenAI-compatible endpoint.             |
 | `SYNC_LOOKBACK_DAYS`                        | `365`                                            | How far back to search Gmail.                                   |
+| `SYNC_MAX_PER_RUN`                          | `40` (AI) / `250`                                | New emails fully processed per sync run.                        |
 | `SYNC_INTERVAL_MINUTES`                     | `10`                                             | In-process poll interval (used only when running as a persistent server, not on Vercel). |
 | `DATA_DIR`                                  | `./data`                                         | JSON-store path when Redis isn't configured (local dev only).   |
 | `PORT`                                      | `4000`                                           | Port for the standalone server (`npm start`).                   |

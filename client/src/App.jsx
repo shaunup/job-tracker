@@ -289,6 +289,14 @@ export default function App() {
                   </div>
                 </div>
               </div>
+              {status.classifier && (
+                <span
+                  className={`pill ${status.classifier.startsWith('ai') ? 'pill-ai' : 'pill-muted'}`}
+                  title={`Emails are classified using: ${status.classifier}`}
+                >
+                  {status.classifier.startsWith('ai') ? '✨ AI classifier' : 'Keyword classifier'}
+                </span>
+              )}
               <button className="btn btn-primary" onClick={doSync} disabled={busy || status.syncing}>
                 {busy || status.syncing ? 'Syncing…' : '↻ Sync now'}
               </button>
