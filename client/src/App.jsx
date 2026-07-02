@@ -176,20 +176,16 @@ export default function App() {
     return () => clearInterval(t);
   }, [status?.syncing, refresh]);
 
-  // While the dashboard is open and Gmail is connected, sync in the background
-  // every few minutes. This keeps statuses fresh on Vercel, where a long-lived
-  // server-side timer can't run — the browser drives the refresh instead.
+  // Syncing/classification is driven by the scheduled cron job (and the manual
+  // "Sync now" button), not the browser. Here we only passively refresh the
+  // displayed data so the dashboard reflects the latest cron results — this is
+  // read-only and does not trigger a Gmail sync.
   useEffect(() => {
-    if (!status?.connected) return;
     const t = setInterval(() => {
-      if (document.visibilityState !== 'visible') return;
-      api
-        .sync()
-        .then(() => refresh())
-        .catch(() => {});
-    }, 5 * 60 * 1000);
+      if (document.visibilityState === 'visible') refresh().catch(() => {});
+    }, 60 * 1000);
     return () => clearInterval(t);
-  }, [status?.connected, refresh]);
+  }, [refresh]);
 
   const doSync = async () => {
     setBusy(true);
@@ -289,6 +285,14 @@ export default function App() {
                   </div>
                 </div>
               </div>
+              {status.classifier && (
+                <span
+                  className={`pill ${status.classifier.startsWith('ai') ? 'pill-ai' : 'pill-muted'}`}
+                  title={`Emails are classified using: ${status.classifier}`}
+                >
+                  {status.classifier.startsWith('ai') ? '✨ AI classifier' : 'Keyword classifier'}
+                </span>
+              )}
               <button className="btn btn-primary" onClick={doSync} disabled={busy || status.syncing}>
                 {busy || status.syncing ? 'Syncing…' : '↻ Sync now'}
               </button>

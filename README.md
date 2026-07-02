@@ -36,7 +36,7 @@ its new status automatically — so the board is always up to date.
 | Data      | **Vercel KV / Upstash Redis** (JSON-file fallback for local dev) |
 | Gmail     | `googleapis` (OAuth 2.0, `gmail.readonly`)                   |
 | Frontend  | React + Vite (custom CSS design system)                      |
-| Auto-sync | Vercel Cron + in-browser background refresh                  |
+| Auto-sync | Vercel Cron (scheduled batch) + manual "Sync now"            |
 
 ---
 
@@ -137,19 +137,59 @@ deploys, open the app and click **Connect Gmail**.
 
 ### How auto-updating works on Vercel
 
-Serverless functions can't run a persistent background timer, so the app keeps
-statuses fresh two ways:
+Updating is **cron-driven** — a scheduled job does the syncing/classification in
+the background, rather than the browser doing it in real time:
 
 - **Vercel Cron** hits `GET /api/cron/sync` on a schedule (configured in
-  `vercel.json`; Hobby plans allow a daily cron, Pro allows more frequent —
-  just edit the `schedule`).
-- **In-browser refresh** — while the dashboard tab is open and connected, it
-  triggers a sync every few minutes so new emails move jobs to their new status
-  automatically. The **Sync now** button forces an immediate refresh any time.
+  `vercel.json`). Each run **drains the backlog**: it makes multiple sync passes
+  within a time budget (`CRON_BUDGET_MS`, default 50s) so one scheduled run can
+  process a large inbox. Hobby plans run cron **once per day**; Pro allows more
+  frequent — just edit the `schedule` in `vercel.json`.
+- **Sync now** button — forces an immediate sync any time you want fresh data.
+- The dashboard **passively refreshes** what it displays every minute (read-only,
+  no sync), so it reflects the latest cron results while open.
 
-> **Function duration:** the very first sync of a large inbox can be slow.
-> `vercel.json` sets `maxDuration` to 60s; if an initial sync times out, just
-> click **Sync now** again — already-imported emails are skipped, so it resumes.
+**Secure the cron endpoint (recommended):** set a `CRON_SECRET` env var in
+Vercel. Vercel automatically sends it as a bearer token on cron requests, and
+the endpoint rejects anything else.
+
+> **Function duration:** `vercel.json` sets `maxDuration` to 60s. A very large
+> first import may need a few scheduled runs (or a couple of **Sync now**
+> clicks) to fully catch up — already-imported emails are skipped, so it just
+> resumes where it left off.
+
+## AI classification with Google Gemini (recommended)
+
+By default the app uses a built-in **keyword classifier**. For much higher
+accuracy, add a **Google Gemini** API key (free tier available) and it will use
+Gemini to read each email and determine its stage, company, and role.
+
+1. Create a key at **https://aistudio.google.com/apikey**.
+2. In Vercel → **Project → Settings → Environment Variables**, add:
+   - `GEMINI_API_KEY` — your key.
+   - *(optional)* `GEMINI_MODEL` (default `gemini-2.0-flash`).
+3. **Redeploy.**
+4. The header shows **"✨ AI classifier"** with the model name when it's active
+   (vs. "Keyword classifier").
+
+Under the hood this uses Gemini's OpenAI-compatible endpoint. You can also use
+OpenAI or any other OpenAI-compatible provider instead — set `OPENAI_API_KEY`
+(plus optional `OPENAI_BASE_URL` / `OPENAI_MODEL`). Gemini takes priority if
+both are set.
+
+| Provider        | Env vars                                              | Default model            |
+| --------------- | ----------------------------------------------------- | ------------------------ |
+| Google Gemini   | `GEMINI_API_KEY` (+ `GEMINI_MODEL`)                   | `gemini-2.0-flash`       |
+| OpenAI          | `OPENAI_API_KEY` (+ `OPENAI_MODEL`)                   | `gpt-4o-mini`            |
+| Other (Groq…)   | `OPENAI_API_KEY` + `OPENAI_BASE_URL` + `OPENAI_MODEL` | —                        |
+
+> Note: "Cursor" is a coding tool, not a runtime inference API, so the deployed
+> app can't call Cursor to classify emails — use one of the providers above.
+
+To re-classify emails you already imported with the old classifier, click
+**Clear data**, then **Sync now** (repeat until it reports it's finished — the
+AI processes a batch per sync to stay within serverless time limits). Your
+Gmail connection is preserved when you clear data.
 
 ## How status detection works
 
@@ -182,7 +222,10 @@ recruiters use in your industry.
 | `GOOGLE_REDIRECT_URI`                       | `http://localhost:4000/api/auth/google/callback` | Must match the URI registered in Google Cloud.                  |
 | `KV_REST_API_URL` / `KV_REST_API_TOKEN`     | — (set by Vercel KV)                             | Durable Redis storage. Injected by the Upstash/Vercel KV integration. |
 | `UPSTASH_REDIS_REST_URL` / `..._TOKEN`      | —                                                | Alternative Redis credentials (standalone Upstash).             |
+| `GEMINI_API_KEY` / `GEMINI_MODEL`           | — / `gemini-2.0-flash`                           | Enables the Gemini AI classifier (recommended). Unset = keyword classifier. |
+| `OPENAI_API_KEY` / `OPENAI_MODEL` / `OPENAI_BASE_URL` | — / `gpt-4o-mini` / OpenAI               | Alternative AI provider (OpenAI or any compatible endpoint).    |
 | `SYNC_LOOKBACK_DAYS`                        | `365`                                            | How far back to search Gmail.                                   |
+| `SYNC_MAX_PER_RUN`                          | `40` (AI) / `250`                                | New emails fully processed per sync run.                        |
 | `SYNC_INTERVAL_MINUTES`                     | `10`                                             | In-process poll interval (used only when running as a persistent server, not on Vercel). |
 | `DATA_DIR`                                  | `./data`                                         | JSON-store path when Redis isn't configured (local dev only).   |
 | `PORT`                                      | `4000`                                           | Port for the standalone server (`npm start`).                   |

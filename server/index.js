@@ -27,6 +27,7 @@ import {
   disconnect,
   syncGmail,
 } from './gmail.js';
+import { isLlmEnabled, llmModel } from './llm.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -51,6 +52,7 @@ app.get('/api/status', async (req, res) => {
       lastSync,
       stats: s,
       storage: storageName,
+      classifier: isLlmEnabled() ? `ai (${llmModel()})` : 'heuristic keywords',
       syncing: syncState.running,
     });
   } catch (e) {
@@ -159,13 +161,42 @@ app.post('/api/sync', async (req, res) => {
   }
 });
 
-// GET endpoint for scheduled syncs (e.g. Vercel Cron, which issues GET
-// requests). No-ops quietly when Gmail isn't connected.
+// GET endpoint for scheduled syncs (Vercel Cron issues GET requests). This is
+// the primary way statuses stay up to date. It drains the backlog by running
+// multiple sync passes within a time budget, so a single scheduled run can
+// process a large inbox. No-ops quietly when Gmail isn't connected.
 app.get('/api/cron/sync', async (req, res) => {
+  // Optional protection: if CRON_SECRET is set, require Vercel's cron auth
+  // header so the endpoint can't be triggered by anyone.
+  if (process.env.CRON_SECRET) {
+    const auth = req.get('authorization') || '';
+    if (auth !== `Bearer ${process.env.CRON_SECRET}`) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+  }
+
   if (!(await isAuthenticated())) return res.json({ ok: true, skipped: 'not connected' });
+
   try {
-    const result = await runSync();
-    res.json({ ok: true, ...result });
+    const budgetMs = Number(process.env.CRON_BUDGET_MS || 50000);
+    const start = Date.now();
+    let passes = 0;
+    let fetched = 0;
+    let jobRelated = 0;
+    let done = false;
+    let remaining = 0;
+
+    do {
+      const r = await runSync();
+      passes += 1;
+      fetched += r.fetched;
+      jobRelated += r.jobRelated;
+      done = r.done;
+      remaining = r.remaining;
+      if (r.done || r.fetched === 0) break;
+    } while (Date.now() - start < budgetMs);
+
+    res.json({ ok: true, passes, fetched, jobRelated, done, remaining });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
