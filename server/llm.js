@@ -1,24 +1,54 @@
 // ---------------------------------------------------------------------------
 // llm.js — optional AI classifier.
 //
-// When an OpenAI-compatible API key is configured, emails are classified by a
-// language model (which reads subject + sender + body) instead of the keyword
-// heuristic. Works with OpenAI or any OpenAI-compatible endpoint via
-// OPENAI_BASE_URL. Falls back silently to the heuristic on any error.
+// When an API key is configured, emails are classified by a language model
+// (which reads subject + sender + body) instead of the keyword heuristic.
+// Falls back silently to the heuristic on any error.
 //
-// Env:
-//   OPENAI_API_KEY   (required to enable)
-//   OPENAI_MODEL     (default: gpt-4o-mini)
-//   OPENAI_BASE_URL  (default: https://api.openai.com/v1)
+// Providers (auto-detected, in priority order):
+//   Google Gemini — set GEMINI_API_KEY (recommended; has a free tier).
+//                   Defaults to model `gemini-2.0-flash` via Gemini's
+//                   OpenAI-compatible endpoint.
+//   OpenAI /
+//   compatible     — set OPENAI_API_KEY (+ optional OPENAI_BASE_URL/OPENAI_MODEL).
+//
+// Overrides: OPENAI_MODEL / GEMINI_MODEL, OPENAI_BASE_URL.
 // ---------------------------------------------------------------------------
 import { STATUSES } from './classifier.js';
 
+const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/openai';
+
+/**
+ * Resolve which model provider to use from the environment.
+ * @returns {{key:string, baseUrl:string, model:string, name:string}|null}
+ */
+export function resolveProvider() {
+  const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  if (geminiKey) {
+    return {
+      key: geminiKey,
+      baseUrl: (process.env.OPENAI_BASE_URL || GEMINI_BASE).replace(/\/$/, ''),
+      model: process.env.GEMINI_MODEL || process.env.OPENAI_MODEL || 'gemini-2.0-flash',
+      name: 'gemini',
+    };
+  }
+  if (process.env.OPENAI_API_KEY) {
+    return {
+      key: process.env.OPENAI_API_KEY,
+      baseUrl: (process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, ''),
+      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+      name: 'openai',
+    };
+  }
+  return null;
+}
+
 export function isLlmEnabled() {
-  return !!process.env.OPENAI_API_KEY;
+  return !!resolveProvider();
 }
 
 export function llmModel() {
-  return process.env.OPENAI_MODEL || 'gpt-4o-mini';
+  return resolveProvider()?.model || '';
 }
 
 const SYSTEM_PROMPT = `You classify a user's job-application emails.
@@ -37,19 +67,20 @@ For EACH email decide:
 
 Return STRICT JSON: {"results":[{"id":"<id>","job_related":<bool>,"status":<string|null>,"company":<string>,"position":<string>}]} with one entry per input email, same ids.`;
 
-async function callOpenAI(messages) {
-  const base = (process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
+async function callModel(messages) {
+  const provider = resolveProvider();
+  if (!provider) throw new Error('No AI provider configured');
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 45000);
   try {
-    const res = await fetch(`${base}/chat/completions`, {
+    const res = await fetch(`${provider.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        Authorization: `Bearer ${provider.key}`,
       },
       body: JSON.stringify({
-        model: llmModel(),
+        model: provider.model,
         temperature: 0,
         response_format: { type: 'json_object' },
         messages,
@@ -58,12 +89,31 @@ async function callOpenAI(messages) {
     });
     if (!res.ok) {
       const text = await res.text();
-      throw new Error(`OpenAI ${res.status}: ${text.slice(0, 300)}`);
+      throw new Error(`${provider.name} ${res.status}: ${text.slice(0, 300)}`);
     }
     const data = await res.json();
     return data.choices?.[0]?.message?.content || '';
   } finally {
     clearTimeout(timer);
+  }
+}
+
+// Parse model output into an object, tolerating markdown code fences or leading
+// prose that some models add around JSON.
+function parseJsonLoose(content) {
+  const cleaned = String(content)
+    .replace(/^```(?:json)?/i, '')
+    .replace(/```$/i, '')
+    .trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    const start = cleaned.indexOf('{');
+    const end = cleaned.lastIndexOf('}');
+    if (start !== -1 && end > start) {
+      return JSON.parse(cleaned.slice(start, end + 1));
+    }
+    throw new Error('LLM returned non-JSON output');
   }
 }
 
@@ -88,17 +138,12 @@ export async function classifyBatchLlm(emails) {
     body: String(e.body || e.snippet || '').replace(/\s+/g, ' ').slice(0, 1500),
   }));
 
-  const content = await callOpenAI([
+  const content = await callModel([
     { role: 'system', content: SYSTEM_PROMPT },
     { role: 'user', content: JSON.stringify({ emails: compact }) },
   ]);
 
-  let parsed;
-  try {
-    parsed = JSON.parse(content);
-  } catch {
-    throw new Error('LLM returned non-JSON output');
-  }
+  const parsed = parseJsonLoose(content);
 
   const map = new Map();
   for (const r of parsed.results || []) {

@@ -158,28 +158,30 @@ the endpoint rejects anything else.
 > clicks) to fully catch up — already-imported emails are skipped, so it just
 > resumes where it left off.
 
-## AI classification (recommended)
+## AI classification with Google Gemini (recommended)
 
 By default the app uses a built-in **keyword classifier**. For much higher
-accuracy, add an OpenAI-compatible API key and it will use an **LLM** to read
-each email and determine its stage, company, and role.
+accuracy, add a **Google Gemini** API key (free tier available) and it will use
+Gemini to read each email and determine its stage, company, and role.
 
-1. In Vercel → **Project → Settings → Environment Variables**, add:
-   - `OPENAI_API_KEY` — your key.
-   - *(optional)* `OPENAI_MODEL` (default `gpt-4o-mini`), `OPENAI_BASE_URL`.
-2. **Redeploy.**
-3. The header shows **"✨ AI classifier"** when it's active (vs. "Keyword
-   classifier").
+1. Create a key at **https://aistudio.google.com/apikey**.
+2. In Vercel → **Project → Settings → Environment Variables**, add:
+   - `GEMINI_API_KEY` — your key.
+   - *(optional)* `GEMINI_MODEL` (default `gemini-2.0-flash`).
+3. **Redeploy.**
+4. The header shows **"✨ AI classifier"** with the model name when it's active
+   (vs. "Keyword classifier").
 
-**You are not locked into OpenAI.** Because the classifier speaks the
-OpenAI-compatible API, you can point it at other providers (including free
-tiers) by setting `OPENAI_BASE_URL` + `OPENAI_MODEL`. Examples:
+Under the hood this uses Gemini's OpenAI-compatible endpoint. You can also use
+OpenAI or any other OpenAI-compatible provider instead — set `OPENAI_API_KEY`
+(plus optional `OPENAI_BASE_URL` / `OPENAI_MODEL`). Gemini takes priority if
+both are set.
 
-| Provider        | `OPENAI_BASE_URL`                                   | Example `OPENAI_MODEL`      |
-| --------------- | --------------------------------------------------- | --------------------------- |
-| OpenAI          | *(leave unset)*                                     | `gpt-4o-mini`               |
-| Groq (free tier)| `https://api.groq.com/openai/v1`                    | `llama-3.3-70b-versatile`   |
-| Google Gemini   | `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini-2.0-flash`    |
+| Provider        | Env vars                                              | Default model            |
+| --------------- | ----------------------------------------------------- | ------------------------ |
+| Google Gemini   | `GEMINI_API_KEY` (+ `GEMINI_MODEL`)                   | `gemini-2.0-flash`       |
+| OpenAI          | `OPENAI_API_KEY` (+ `OPENAI_MODEL`)                   | `gpt-4o-mini`            |
+| Other (Groq…)   | `OPENAI_API_KEY` + `OPENAI_BASE_URL` + `OPENAI_MODEL` | —                        |
 
 > Note: "Cursor" is a coding tool, not a runtime inference API, so the deployed
 > app can't call Cursor to classify emails — use one of the providers above.
@@ -220,8 +222,8 @@ recruiters use in your industry.
 | `GOOGLE_REDIRECT_URI`                       | `http://localhost:4000/api/auth/google/callback` | Must match the URI registered in Google Cloud.                  |
 | `KV_REST_API_URL` / `KV_REST_API_TOKEN`     | — (set by Vercel KV)                             | Durable Redis storage. Injected by the Upstash/Vercel KV integration. |
 | `UPSTASH_REDIS_REST_URL` / `..._TOKEN`      | —                                                | Alternative Redis credentials (standalone Upstash).             |
-| `OPENAI_API_KEY`                            | —                                                | Enables the AI classifier. Unset = keyword classifier.          |
-| `OPENAI_MODEL` / `OPENAI_BASE_URL`          | `gpt-4o-mini` / OpenAI                           | AI model and (optional) OpenAI-compatible endpoint.             |
+| `GEMINI_API_KEY` / `GEMINI_MODEL`           | — / `gemini-2.0-flash`                           | Enables the Gemini AI classifier (recommended). Unset = keyword classifier. |
+| `OPENAI_API_KEY` / `OPENAI_MODEL` / `OPENAI_BASE_URL` | — / `gpt-4o-mini` / OpenAI               | Alternative AI provider (OpenAI or any compatible endpoint).    |
 | `SYNC_LOOKBACK_DAYS`                        | `365`                                            | How far back to search Gmail.                                   |
 | `SYNC_MAX_PER_RUN`                          | `40` (AI) / `250`                                | New emails fully processed per sync run.                        |
 | `SYNC_INTERVAL_MINUTES`                     | `10`                                             | In-process poll interval (used only when running as a persistent server, not on Vercel). |
