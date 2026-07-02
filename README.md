@@ -36,7 +36,7 @@ its new status automatically — so the board is always up to date.
 | Data      | **Vercel KV / Upstash Redis** (JSON-file fallback for local dev) |
 | Gmail     | `googleapis` (OAuth 2.0, `gmail.readonly`)                   |
 | Frontend  | React + Vite (custom CSS design system)                      |
-| Auto-sync | Vercel Cron + in-browser background refresh                  |
+| Auto-sync | Vercel Cron (scheduled batch) + manual "Sync now"            |
 
 ---
 
@@ -137,19 +137,26 @@ deploys, open the app and click **Connect Gmail**.
 
 ### How auto-updating works on Vercel
 
-Serverless functions can't run a persistent background timer, so the app keeps
-statuses fresh two ways:
+Updating is **cron-driven** — a scheduled job does the syncing/classification in
+the background, rather than the browser doing it in real time:
 
 - **Vercel Cron** hits `GET /api/cron/sync` on a schedule (configured in
-  `vercel.json`; Hobby plans allow a daily cron, Pro allows more frequent —
-  just edit the `schedule`).
-- **In-browser refresh** — while the dashboard tab is open and connected, it
-  triggers a sync every few minutes so new emails move jobs to their new status
-  automatically. The **Sync now** button forces an immediate refresh any time.
+  `vercel.json`). Each run **drains the backlog**: it makes multiple sync passes
+  within a time budget (`CRON_BUDGET_MS`, default 50s) so one scheduled run can
+  process a large inbox. Hobby plans run cron **once per day**; Pro allows more
+  frequent — just edit the `schedule` in `vercel.json`.
+- **Sync now** button — forces an immediate sync any time you want fresh data.
+- The dashboard **passively refreshes** what it displays every minute (read-only,
+  no sync), so it reflects the latest cron results while open.
 
-> **Function duration:** the very first sync of a large inbox can be slow.
-> `vercel.json` sets `maxDuration` to 60s; if an initial sync times out, just
-> click **Sync now** again — already-imported emails are skipped, so it resumes.
+**Secure the cron endpoint (recommended):** set a `CRON_SECRET` env var in
+Vercel. Vercel automatically sends it as a bearer token on cron requests, and
+the endpoint rejects anything else.
+
+> **Function duration:** `vercel.json` sets `maxDuration` to 60s. A very large
+> first import may need a few scheduled runs (or a couple of **Sync now**
+> clicks) to fully catch up — already-imported emails are skipped, so it just
+> resumes where it left off.
 
 ## AI classification (recommended)
 
@@ -158,12 +165,24 @@ accuracy, add an OpenAI-compatible API key and it will use an **LLM** to read
 each email and determine its stage, company, and role.
 
 1. In Vercel → **Project → Settings → Environment Variables**, add:
-   - `OPENAI_API_KEY` — your key (from platform.openai.com or any OpenAI-
-     compatible provider).
+   - `OPENAI_API_KEY` — your key.
    - *(optional)* `OPENAI_MODEL` (default `gpt-4o-mini`), `OPENAI_BASE_URL`.
 2. **Redeploy.**
 3. The header shows **"✨ AI classifier"** when it's active (vs. "Keyword
    classifier").
+
+**You are not locked into OpenAI.** Because the classifier speaks the
+OpenAI-compatible API, you can point it at other providers (including free
+tiers) by setting `OPENAI_BASE_URL` + `OPENAI_MODEL`. Examples:
+
+| Provider        | `OPENAI_BASE_URL`                                   | Example `OPENAI_MODEL`      |
+| --------------- | --------------------------------------------------- | --------------------------- |
+| OpenAI          | *(leave unset)*                                     | `gpt-4o-mini`               |
+| Groq (free tier)| `https://api.groq.com/openai/v1`                    | `llama-3.3-70b-versatile`   |
+| Google Gemini   | `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini-2.0-flash`    |
+
+> Note: "Cursor" is a coding tool, not a runtime inference API, so the deployed
+> app can't call Cursor to classify emails — use one of the providers above.
 
 To re-classify emails you already imported with the old classifier, click
 **Clear data**, then **Sync now** (repeat until it reports it's finished — the
